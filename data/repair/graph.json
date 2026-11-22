@@ -1,0 +1,308 @@
+{
+  "graph_version": "repair-graph-3",
+  "nodes": [
+    {
+      "id": "orders",
+      "type": "input",
+      "table": "db.orders",
+      "row_id": "order_id",
+      "columns": [
+        {
+          "name": "order_id",
+          "type": "TEXT"
+        },
+        {
+          "name": "acc_id",
+          "type": "TEXT"
+        },
+        {
+          "name": "region",
+          "type": "TEXT"
+        },
+        {
+          "name": "amount",
+          "type": "INTEGER"
+        }
+      ]
+    },
+    {
+      "id": "accounts",
+      "type": "input",
+      "table": "db.accounts",
+      "row_id": "acc_pk",
+      "columns": [
+        {
+          "name": "acc_pk",
+          "type": "TEXT"
+        },
+        {
+          "name": "acc_id",
+          "type": "TEXT"
+        },
+        {
+          "name": "owner",
+          "type": "TEXT"
+        }
+      ]
+    },
+    {
+      "id": "targets",
+      "type": "input",
+      "table": "db.targets",
+      "row_id": "target_id",
+      "columns": [
+        {
+          "name": "target_id",
+          "type": "TEXT"
+        },
+        {
+          "name": "region",
+          "type": "TEXT"
+        },
+        {
+          "name": "bucket",
+          "type": "TEXT"
+        }
+      ]
+    },
+    {
+      "id": "p_orders",
+      "type": "project",
+      "input": "orders",
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "order_acc",
+          "refs": [
+            "orders.acc_id"
+          ],
+          "raw": "orders.acc_id"
+        },
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "orders.region"
+          ],
+          "raw": "orders.region"
+        },
+        {
+          "kind": "ref",
+          "out_column": "amount",
+          "refs": [
+            "orders.amount"
+          ],
+          "raw": "orders.amount"
+        }
+      ]
+    },
+    {
+      "id": "j_settle",
+      "type": "join",
+      "left": "p_orders",
+      "right": "accounts",
+      "join_type": "inner",
+      "on": [
+        {
+          "kind": "op",
+          "op": "=",
+          "out_column": "_on_acc",
+          "refs": [
+            "p_orders.order_acc",
+            "accounts.acc_id"
+          ],
+          "raw": "p_orders.order_acc = accounts.acc_id",
+          "role_override": "join_on"
+        }
+      ],
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "acc_id",
+          "refs": [
+            "p_orders.order_acc"
+          ],
+          "raw": "p_orders.order_acc AS acc_id"
+        },
+        {
+          "kind": "ref",
+          "out_column": "matched_acc",
+          "refs": [
+            "accounts.acc_id"
+          ],
+          "raw": "accounts.acc_id AS matched_acc"
+        },
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "p_orders.region"
+          ],
+          "raw": "p_orders.region"
+        },
+        {
+          "kind": "ref",
+          "out_column": "amount",
+          "refs": [
+            "p_orders.amount"
+          ],
+          "raw": "p_orders.amount"
+        },
+        {
+          "kind": "ref",
+          "out_column": "owner",
+          "refs": [
+            "accounts.owner"
+          ],
+          "raw": "accounts.owner"
+        }
+      ]
+    },
+    {
+      "id": "a_region",
+      "type": "agg",
+      "input": "j_settle",
+      "group_by": [
+        "j_settle.region"
+      ],
+      "measures": [
+        {
+          "func": "sum",
+          "out_column": "total_amt",
+          "ref": "j_settle.amount"
+        },
+        {
+          "func": "count",
+          "out_column": "n"
+        }
+      ],
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "j_settle.region"
+          ],
+          "raw": "j_settle.region (group key)"
+        },
+        {
+          "kind": "op",
+          "op": "sum",
+          "out_column": "total_amt",
+          "refs": [
+            "j_settle.amount"
+          ],
+          "raw": "sum(j_settle.amount)"
+        },
+        {
+          "kind": "op",
+          "op": "count",
+          "out_column": "n",
+          "refs": [],
+          "raw": "count(*)"
+        }
+      ]
+    },
+    {
+      "id": "j_target",
+      "type": "join",
+      "left": "a_region",
+      "right": "targets",
+      "on": [
+        {
+          "kind": "op",
+          "op": "=",
+          "out_column": "_on_region",
+          "refs": [
+            "a_region.region",
+            "targets.region"
+          ],
+          "raw": "a_region.region = targets.region",
+          "role_override": "join_on"
+        }
+      ],
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "a_region.region"
+          ],
+          "raw": "a_region.region"
+        },
+        {
+          "kind": "ref",
+          "out_column": "target_region",
+          "refs": [
+            "targets.region"
+          ],
+          "raw": "targets.region AS target_region"
+        },
+        {
+          "kind": "ref",
+          "out_column": "total_amt",
+          "refs": [
+            "a_region.total_amt"
+          ],
+          "raw": "a_region.total_amt"
+        },
+        {
+          "kind": "ref",
+          "out_column": "n",
+          "refs": [
+            "a_region.n"
+          ],
+          "raw": "a_region.n"
+        },
+        {
+          "kind": "ref",
+          "out_column": "bucket",
+          "refs": [
+            "targets.bucket"
+          ],
+          "raw": "targets.bucket"
+        }
+      ]
+    },
+    {
+      "id": "o_release",
+      "type": "output",
+      "table": "release_settlement",
+      "input": "j_target",
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "j_target.region"
+          ],
+          "raw": "j_target.region"
+        },
+        {
+          "kind": "ref",
+          "out_column": "total_amt",
+          "refs": [
+            "j_target.total_amt"
+          ],
+          "raw": "j_target.total_amt"
+        },
+        {
+          "kind": "ref",
+          "out_column": "n",
+          "refs": [
+            "j_target.n"
+          ],
+          "raw": "j_target.n"
+        },
+        {
+          "kind": "ref",
+          "out_column": "bucket",
+          "refs": [
+            "j_target.bucket"
+          ],
+          "raw": "j_target.bucket"
+        }
+      ]
+    }
+  ]
+}

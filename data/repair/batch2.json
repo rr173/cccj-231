@@ -1,0 +1,39 @@
+{
+  "expected_version": 2,
+  "corrections": [
+    {
+      "node_id": "orders",
+      "row_id": "o6",
+      "op": "insert",
+      "values": {
+        "acc_id": "B",
+        "region": "R3",
+        "amount": 70
+      }
+    },
+    {
+      "node_id": "orders",
+      "row_id": "o4",
+      "op": "replace",
+      "values": {
+        "acc_id": "B",
+        "region": "R3",
+        "amount": 44
+      }
+    },
+    {
+      "node_id": "targets",
+      "row_id": "t3",
+      "op": "delete"
+    },
+    {
+      "node_id": "targets",
+      "row_id": "t4",
+      "op": "replace",
+      "values": {
+        "region": "R4",
+        "bucket": "warm"
+      }
+    }
+  ]
+}

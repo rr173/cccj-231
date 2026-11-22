@@ -27,6 +27,27 @@ class ConsistencyError(LineageError):
     """Runtime / package / graph versions or summaries do not agree."""
 
 
+class RepairError(LineageError):
+    """Base class for local release-repair errors."""
+
+
+class RepairValidationError(RepairError):
+    """A repair graph or correction payload is outside the executable subset.
+
+    Raised before any write transaction is opened (or rolled back when the
+    problem is only detectable against stored state), so a failed repair
+    never leaves partial changes behind.
+    """
+
+
+class RepairConflictError(RepairError):
+    """The batch conflicts with the stored workspace state.
+
+    Covers stale expected versions, swapped graphs, inserting an existing
+    row and deleting/replacing a missing row.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Expressions and nodes
 # ---------------------------------------------------------------------------

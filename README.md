@@ -147,3 +147,30 @@ python3 -I tests/run_reports.py        # 分页 / 流式导出 / 去重测试
 ```
 
 全部仅使用 Python 标准库（3.10+），无第三方依赖。
+
+## 8. 本地发布表修复（repair 子命令）
+
+发布后发现一批订单/账户归属错误时，无需重刷整批数据。`repair` 子命令在
+单个 SQLite 工作区内物化初始发布，并按批只重算受影响的连接键与分组，
+同一事务内切换新版本。
+
+* 可执行子集：单发布出口闭包内的输入、直接取列/重命名投影、单列等值内
+  连接、至少一列分组的整数 `SUM`/`COUNT(*)`；聚合用结构化
+  `group_by`/`measures`，不解析 `raw`；
+* 批次绑定 `expected_version`，支持按节点+行 ID 插入/删除/整行替换，
+  冲突、旧版本、换图一律拒绝且无部分改动；
+* 连接键跨键迁移、两侧同批更正、旧组消失/新组出现、聚合行再参与连接均
+  由朴素全算结果逐版对照；增量访问范围由 `AccessLedger` 断言，不靠耗时。
+
+接口、数据库布局、读取发布行与版本号的方式见 [`docs/repair.md`](docs/repair.md)。
+
+```bash
+python3 -I tests/build_repair_fixture.py   # 生成 data/repair 夹具
+python3 -I tests/test_repair.py            # 修复主回归（含原子失败注入）
+python3 -I tests/test_repair_shapes.py     # 整数键/多列分组/聚合串接
+bin/lineage-diag repair init  --graph data/repair/graph.json \
+    --db tmp/ws.db --init data/repair/initial.json
+bin/lineage-diag repair apply --graph data/repair/graph.json \
+    --db tmp/ws.db --batch data/repair/batch1.json
+bin/lineage-diag repair read  --graph data/repair/graph.json --db tmp/ws.db
+```

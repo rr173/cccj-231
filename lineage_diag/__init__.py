@@ -16,7 +16,25 @@ from .diagnoser import (
     PROVEN,
     UNPROVABLE,
 )
-from .model import ConsistencyError, GraphValidationError, LineageError
+from .model import (
+    ConsistencyError,
+    GraphValidationError,
+    LineageError,
+    RepairConflictError,
+    RepairError,
+    RepairValidationError,
+)
+from .repair import (
+    Correction,
+    RepairBatch,
+    RepairPlan,
+    RepairWorkspace,
+    apply_repair_batch,
+    initialize_workspace,
+    load_repair_plan,
+    read_release,
+)
+from .repair_store import AccessLedger
 
 __all__ = [
     "load_artifacts",
@@ -34,4 +52,17 @@ __all__ = [
     "ConsistencyError",
     "GraphValidationError",
     "LineageError",
+    # local release repair
+    "initialize_workspace",
+    "apply_repair_batch",
+    "read_release",
+    "load_repair_plan",
+    "RepairWorkspace",
+    "RepairPlan",
+    "RepairBatch",
+    "Correction",
+    "AccessLedger",
+    "RepairError",
+    "RepairValidationError",
+    "RepairConflictError",
 ]
