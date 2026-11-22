@@ -174,3 +174,23 @@ bin/lineage-diag repair apply --graph data/repair/graph.json \
     --db tmp/ws.db --batch data/repair/batch1.json
 bin/lineage-diag repair read  --graph data/repair/graph.json --db tmp/ws.db
 ```
+
+## 9. 净变更订阅（repair subscribe）
+
+下游对账库已持有上次同步的整表、落后若干发布版本时，可以只拉两个版本
+之间的**净变更**：哪些完整发布业务行该补入或移除、各几份。工作区在当前
+版本启用订阅并设置保留次数后，每次成功发布在同一事务里记录该版净变更
+并推进保留窗口；消费者用已同步版本作起点分页拉取，凭游标跨进程续读，
+每条变更恰好交付一次。起点滑出保留窗口会被明确拒绝并要求重新取全量
+基线。协议、失败处理与访问范围保证详见
+[`docs/repair.md`](docs/repair.md#9-净变更订阅repair-subscribe)。
+
+```bash
+bin/lineage-diag repair subscribe enable --graph data/repair/graph.json \
+    --db tmp/ws.db --retention 3
+bin/lineage-diag repair subscribe read --graph data/repair/graph.json \
+    --db tmp/ws.db --from-version 2 --page-size 100
+bin/lineage-diag repair subscribe read --graph data/repair/graph.json \
+    --db tmp/ws.db --cursor 'eyJ...'
+python3 -I tests/test_repair_subscription.py   # 可复跑的端到端示例
+```

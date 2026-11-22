@@ -43,6 +43,10 @@ OP_WRITE_PROV = "write_prov"
 OP_DELETE_REL = "delete_rel"
 OP_SCAN = "full_scan"                   # whole-table scan (init only)
 OP_SQL = "sql"                          # raw executed statement (trace)
+OP_READ_SUB = "read_sub_delta"          # subscription delta page read
+OP_WRITE_SUB = "write_sub_delta"        # subscription delta write / gc
+
+SUB_DELTA_TABLE = "sub_delta"
 
 
 @dataclass
@@ -97,6 +101,49 @@ def rel_table(node_id: str) -> str:
 
 def prov_table(node_id: str) -> str:
     return f"prov_{node_id}"
+
+
+@dataclass(frozen=True)
+class SubscriptionConfig:
+    """Subscription parameters committed in ``meta`` at enable time."""
+
+    enabled_version: int          # earliest consumable from-version
+    retention: int                # how many recent releases keep deltas
+    sub_id: str                   # random id binding cursors to this workspace
+
+
+class ReleaseDeltaTracker:
+    """Net release-row copy difference produced by one repair batch.
+
+    The repair engine already knows exactly which output-node rows it
+    deletes and inserts; the tracker turns that change set into a signed
+    multiset difference keyed by the canonical business-row encoding, so
+    publishing a version never scans the release table.
+    """
+
+    def __init__(self, out_columns: Sequence[str]):
+        self.out_columns = list(out_columns)
+        self._net: Dict[str, int] = {}
+
+    def record(self, values: Mapping[str, Any], sign: int) -> None:
+        key = release_row_key(self.out_columns, values)
+        self._net[key] = self._net.get(key, 0) + sign
+
+    def nonzero_items(self) -> List[Tuple[str, int]]:
+        return [(key, delta) for key, delta in self._net.items() if delta]
+
+
+def release_row_key(out_columns: Sequence[str],
+                    values: Mapping[str, Any]) -> str:
+    """Canonical TEXT identity of one full release business row.
+
+    JSON object with sorted keys: ``"5"`` (TEXT) and ``5`` (INTEGER) keep
+    their distinct identities, and every canonical key starts with ``"{"``
+    so ``""`` is a strict lower bound for keyset pagination.
+    """
+    return json.dumps({c: values[c] for c in out_columns},
+                      sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"))
 
 
 class RepairStore:
@@ -462,6 +509,110 @@ class RepairStore:
             f"SELECT {select} FROM {_ident(table)}"
         ).fetchall()
         return version, [{c: row[c] for c in out_cols} for row in rows]
+
+    # ------------------------------------------------------------------
+    # Release-change subscription
+    # ------------------------------------------------------------------
+    def create_subscription_schema(self) -> None:
+        """Create the subscription delta table (idempotent).
+
+        ``sub_delta`` holds one signed net-copy row per (version, business
+        row); only release rows whose copy count changed in that version
+        appear here.  The ``(row_key, version)`` index lets paged reads
+        stream groups in canonical-row order and stop at ``LIMIT`` without
+        materializing the whole interval.
+        """
+        self.conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {SUB_DELTA_TABLE} ("
+            "version INTEGER NOT NULL, "
+            "row_key TEXT NOT NULL, "
+            "delta INTEGER NOT NULL CHECK (delta <> 0), "
+            "PRIMARY KEY (version, row_key))"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_sub_delta_key "
+            f"ON {SUB_DELTA_TABLE}(row_key, version)"
+        )
+
+    def subscription_config(self) -> Optional[SubscriptionConfig]:
+        enabled = self.get_meta("sub_enabled")
+        if enabled is None:
+            return None
+        return SubscriptionConfig(
+            enabled_version=int(enabled),
+            retention=int(self.get_meta("sub_retention")),
+            sub_id=str(self.get_meta("sub_id")),
+        )
+
+    def enable_subscription_meta(self, version: int, retention: int,
+                                 sub_id: str) -> None:
+        self.conn.executemany(
+            "INSERT INTO meta(key, value) VALUES (?, ?)",
+            [("sub_enabled", str(version)),
+             ("sub_retention", str(retention)),
+             ("sub_id", sub_id)],
+        )
+
+    def write_subscription_deltas(self, version: int,
+                                  items: Sequence[Tuple[str, int]]) -> None:
+        """Record the nonzero net-copy rows of one published version."""
+        rows = [(version, key, delta) for key, delta in items]
+        self.conn.executemany(
+            f"INSERT INTO {SUB_DELTA_TABLE}(version, row_key, delta) "
+            "VALUES (?, ?, ?)",
+            rows,
+        )
+        for key, delta in items:
+            self.ledger.record(OP_WRITE_SUB, SUB_DELTA_TABLE,
+                               f"v{version} delta={delta:+d} {key}")
+
+    def gc_subscription(self, cutoff_version: int) -> None:
+        """Drop deltas at or below the retention boundary.
+
+        Deletion happens inside the publish transaction, so the visible
+        window and the new version always move together; a rolled-back
+        repair never expires old start points.  No VACUUM: the file space
+        is intentionally left allocated.
+        """
+        cur = self.conn.execute(
+            f"DELETE FROM {SUB_DELTA_TABLE} WHERE version <= ?",
+            (cutoff_version,),
+        )
+        self.ledger.record(OP_WRITE_SUB, SUB_DELTA_TABLE,
+                           f"gc version<={cutoff_version} "
+                           f"removed={cur.rowcount}")
+
+    def iter_subscription_page(self, from_version: int, to_version: int,
+                               after_key: Optional[str], limit: int):
+        """Yield ``(row_key, net)`` groups in canonical-row order.
+
+        Keyset pagination over ``(row_key, version)``: the server pulls at
+        most ``limit`` groups from SQLite and never builds the interval
+        result as a whole.  Only delta rows inside ``(from_version,
+        to_version]`` participate -- release/source/provenance tables are
+        not touched at all.
+        """
+        # Canonical row keys are JSON objects, so "" is a strict lower bound
+        # and the first page uses the same keyset predicate as later pages.
+        lower = after_key if after_key is not None else ""
+        self.ledger.record(
+            OP_READ_SUB, SUB_DELTA_TABLE,
+            f"version in ({from_version}, {to_version}] "
+            f"row_key>{lower!r} limit={limit}")
+        cur = self.conn.execute(
+            f"SELECT row_key, SUM(delta) AS net FROM {SUB_DELTA_TABLE} "
+            "INDEXED BY ix_sub_delta_key "
+            "WHERE row_key > ? AND version > ? AND version <= ? "
+            "GROUP BY row_key HAVING SUM(delta) <> 0 "
+            "ORDER BY row_key LIMIT ?",
+            (lower, from_version, to_version, limit),
+        )
+        fetched = 0
+        for row in cur:
+            fetched += 1
+            yield row["row_key"], int(row["net"])
+        self.ledger.record(OP_READ_SUB, SUB_DELTA_TABLE,
+                           f"fetched={fetched}")
 
 
 def canonical_gkey(group_values: Sequence[Any]) -> str:

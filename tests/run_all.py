@@ -20,6 +20,7 @@ STEPS = [
     ["tests/build_repair_fixture.py"],
     ["tests/test_repair.py"],
     ["tests/test_repair_shapes.py"],
+    ["tests/test_repair_subscription.py"],
 ]
 
 

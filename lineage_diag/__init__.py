@@ -23,6 +23,7 @@ from .model import (
     RepairConflictError,
     RepairError,
     RepairValidationError,
+    SubscriptionError,
 )
 from .repair import (
     Correction,
@@ -30,9 +31,11 @@ from .repair import (
     RepairPlan,
     RepairWorkspace,
     apply_repair_batch,
+    enable_subscription,
     initialize_workspace,
     load_repair_plan,
     read_release,
+    read_subscription,
 )
 from .repair_store import AccessLedger
 
@@ -56,6 +59,8 @@ __all__ = [
     "initialize_workspace",
     "apply_repair_batch",
     "read_release",
+    "enable_subscription",
+    "read_subscription",
     "load_repair_plan",
     "RepairWorkspace",
     "RepairPlan",
@@ -65,4 +70,5 @@ __all__ = [
     "RepairError",
     "RepairValidationError",
     "RepairConflictError",
+    "SubscriptionError",
 ]

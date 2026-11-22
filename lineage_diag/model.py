@@ -48,6 +48,30 @@ class RepairConflictError(RepairError):
     """
 
 
+class SubscriptionError(RepairError):
+    """A release-change subscription operation was rejected.
+
+    ``kind`` is a stable machine-readable tag so scripts can branch on it:
+
+    * ``not_enabled``          - the workspace has no subscription;
+    * ``already_enabled``      - enable attempted twice;
+    * ``invalid_start``        - the from-version is not consumable (before
+                                 enablement, ahead of the committed version,
+                                 or otherwise malformed);
+    * ``expired``              - the from-version slid out of the retention
+                                 window; the consumer must re-fetch a full
+                                 baseline and resubscribe from it;
+    * ``cursor_invalid``       - the continuation token is undecodable,
+                                 belongs to another subscription, or
+                                 contradicts the requested start;
+    * ``invalid_page_size``    - page size outside the supported range.
+    """
+
+    def __init__(self, message: str, kind: str = "invalid_start"):
+        super().__init__(message)
+        self.kind = kind
+
+
 # ---------------------------------------------------------------------------
 # Expressions and nodes
 # ---------------------------------------------------------------------------

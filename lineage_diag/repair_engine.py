@@ -47,6 +47,7 @@ from .repair_plan import (
 )
 from .repair_store import (
     INITIAL_VERSION,
+    ReleaseDeltaTracker,
     RepairStore,
     canonical_gkey,
     rel_table,
@@ -197,6 +198,9 @@ class RepairEngine:
         self.plan = plan
         self.conn = store.conn
         self._batch_changes: Optional[Dict[str, NodeChanges]] = None
+        # Set for the duration of apply_batch when the workspace has a
+        # release-change subscription; see _recompute_project_like.
+        self._release_tracker: Optional[ReleaseDeltaTracker] = None
 
     # ------------------------------------------------------------------
     # Initial full materialization
@@ -270,7 +274,7 @@ class RepairEngine:
     # ------------------------------------------------------------------
     def apply_batch(self, batch: RepairBatch,
                     failpoint: Failpoint = None) -> Dict[str, Any]:
-        self._verify_graph_identity()
+        self.verify_graph_identity()
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             current = int(self.store.get_meta("version"))
@@ -279,6 +283,13 @@ class RepairEngine:
                     f"stale expected_version {batch.expected_version}; "
                     f"workspace is at version {current}"
                 )
+            # When a subscription is enabled, accumulate the release-row
+            # copy difference from the change set this batch already
+            # produces -- no extra release-table scan is needed.
+            sub_cfg = self.store.subscription_config()
+            if sub_cfg is not None:
+                self._release_tracker = ReleaseDeltaTracker(
+                    self.plan.columns[self.plan.output_node_id])
             changes: Dict[str, NodeChanges] = {
                 nid: NodeChanges() for nid in self.plan.closure
             }
@@ -297,9 +308,18 @@ class RepairEngine:
                     failpoint(nid)
             self._batch_changes = None
             new_version = current + 1
+            tracker, self._release_tracker = self._release_tracker, None
+            if tracker is not None:
+                # New deltas, the version bump and the retention boundary
+                # commit together; a rollback therefore never publishes
+                # partial changes nor expires old start points early.
+                self.store.write_subscription_deltas(
+                    new_version, tracker.nonzero_items())
+                self.store.gc_subscription(new_version - sub_cfg.retention)
             self.store.set_version(new_version)
             self.conn.commit()
         except Exception:
+            self._release_tracker = None
             self.conn.rollback()
             raise
         return {
@@ -313,7 +333,7 @@ class RepairEngine:
             ],
         }
 
-    def _verify_graph_identity(self) -> None:
+    def verify_graph_identity(self) -> None:
         stored_version = self.store.get_meta("graph_version")
         stored_digest = self.store.get_meta("graph_digest")
         if stored_version is None:
@@ -435,6 +455,14 @@ class RepairEngine:
             changes[upstream_id].all_sids())
         if not affected_sids and not source_dirty and not upstream_dirty:
             return
+        track = self._release_tracker is not None and \
+            nid == self.plan.output_node_id
+        if track and affected_sids:
+            # Capture the withdrawing release rows before deletion; the read
+            # is scoped to exactly the sids this batch already touches.
+            for _, old_values in self.store.get_rel_rows_by_sids(
+                    nid, sorted(affected_sids)):
+                self._release_tracker.record(old_values, -1)
         self.store.delete_rel_sids(nid, sorted(affected_sids))
         self.store.delete_prov_sids(nid, sorted(affected_sids))
         changes[nid].old_sids.extend(sorted(affected_sids))
@@ -458,16 +486,15 @@ class RepairEngine:
                 if values is None:
                     continue
                 out = self._project(self.plan.projections[nid], values)
+                if track:
+                    self._release_tracker.record(out, +1)
                 new_sid = self.store.insert_rel(nid, out)
                 self.store.insert_prov(nid, new_sid,
                                        {(upstream_id, rid): 1})
                 changes[nid].new_sids.append(new_sid)
         else:
-            upstream_sids = changes[upstream_id].all_sids()
-            # Also include current upstream sids reached via source taint,
-            # for the first node downstream of a corrected source chain.
-            upstream_sids |= set(
-                self._tainted_relation_sids(upstream_id, taint))
+            upstream_sids = self._upstream_sids_for_rebuild(
+                upstream_id, taint, changes)
             if not upstream_sids:
                 return
             members = self.store.get_rel_rows_by_sids(
@@ -476,10 +503,45 @@ class RepairEngine:
                 upstream_id, sorted(upstream_sids))
             for up_sid, values in members:
                 out = self._project(self.plan.projections[nid], values)
+                if track:
+                    self._release_tracker.record(out, +1)
                 new_sid = self.store.insert_rel(nid, out)
                 self.store.insert_prov(nid, new_sid,
                                        dict(up_prov[up_sid]))
                 changes[nid].new_sids.append(new_sid)
+
+    def _upstream_sids_for_rebuild(self, upstream_id: str,
+                                   taint: Dict[str, set],
+                                   changes: Dict[str, NodeChanges]) -> set:
+        """Current upstream rows matching the deletion source set.
+
+        A project-like node deletes its rows whose provenance shares any
+        source row with a corrected input or with a changed upstream row
+        (:meth:`_affected_sids`).  Because a project copies provenance
+        verbatim, downstream row D is derived from upstream row U exactly
+        when ``prov(D) == prov(U)``; the rebuild must therefore revisit
+        every *current* upstream row matching that same source set.
+        Otherwise a downstream row deleted only through provenance overlap
+        (e.g. two release rows sharing one account source row) would
+        vanish without being re-emitted.  Lookups go through the
+        provenance index, so the scope stays keyed.
+        """
+        sids = set(self._tainted_relation_sids(upstream_id, taint))
+        changed = changes[upstream_id].all_sids()
+        if changed:
+            prov_map = self.store.get_provenance(
+                upstream_id, sorted(changed))
+            shared_sources: set = set()
+            for prov in prov_map.values():
+                shared_sources.update(prov.keys())
+            for (src, rid) in sorted(shared_sources):
+                sids.update(self.store.find_sids_by_provenance(
+                    upstream_id, src, [rid]))
+        # New upstream sids are already reached through their provenance;
+        # including the changed set is harmless (deleted sids simply
+        # return no current row).
+        sids |= changed
+        return sids
 
     def _affected_sids(self, nid: str, taint: Dict[str, set],
                        changes: Dict[str, NodeChanges]) -> set:

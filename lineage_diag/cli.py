@@ -14,6 +14,12 @@ Local release repair (single SQLite workspace):
         --graph repair_graph.json --db workspace.db --batch batch.json
     python -I -m lineage_diag.cli repair read \\
         --graph repair_graph.json --db workspace.db
+    python -I -m lineage_diag.cli repair subscribe enable \\
+        --graph repair_graph.json --db workspace.db --retention 3
+    python -I -m lineage_diag.cli repair subscribe read \\
+        --graph repair_graph.json --db workspace.db --from-version 2
+    python -I -m lineage_diag.cli repair subscribe read \\
+        --graph repair_graph.json --db workspace.db --cursor TOKEN
 """
 
 from __future__ import annotations
@@ -34,9 +40,11 @@ from .api import (
 from .model import LineageError
 from .repair import (
     apply_repair_batch,
+    enable_subscription,
     initialize_workspace,
     load_json,
     read_release,
+    read_subscription,
 )
 
 
@@ -109,6 +117,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_read = repair_sub.add_parser(
         "read", help="read committed release rows and their version")
     _repair_common(p_read)
+
+    p_sub = repair_sub.add_parser(
+        "subscribe", help="net-change subscription for downstream consumers")
+    sub_sub = p_sub.add_subparsers(dest="subscribe_cmd", required=True)
+
+    p_sub_en = sub_sub.add_parser(
+        "enable", help="enable the subscription at the current version")
+    _repair_common(p_sub_en)
+    p_sub_en.add_argument("--retention", type=int, required=True,
+                          help="keep change deltas for this many most "
+                               "recent successful publishes (>= 1)")
+
+    p_sub_rd = sub_sub.add_parser(
+        "read", help="read one page of net release-row changes")
+    _repair_common(p_sub_rd)
+    p_sub_rd.add_argument("--from-version", type=int, default=None,
+                          help="version the consumer has fully synced "
+                               "(first page)")
+    p_sub_rd.add_argument("--cursor", default=None,
+                          help="continuation token from the previous page")
+    p_sub_rd.add_argument("--page-size", type=int, default=100)
     return parser
 
 
@@ -127,6 +156,15 @@ def _run_repair(args: argparse.Namespace) -> dict:
         summary = apply_repair_batch(
             args.db, graph_payload, load_json(args.batch))
         return {"applied": args.db, **summary}
+    if args.repair_cmd == "subscribe":
+        if args.subscribe_cmd == "enable":
+            return {"db": args.db,
+                    **enable_subscription(args.db, graph_payload,
+                                          args.retention)}
+        return read_subscription(args.db, graph_payload,
+                                 from_version=args.from_version,
+                                 cursor=args.cursor,
+                                 page_size=args.page_size)
     version, rows = read_release(args.db, graph_payload)
     return {"db": args.db, "version": version, "row_count": len(rows),
             "rows": rows}

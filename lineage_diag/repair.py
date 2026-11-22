@@ -20,10 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .model import RepairError, RepairValidationError
+from .model import RepairError, RepairValidationError, SubscriptionError
 from .repair_engine import (
     Correction,
     Failpoint,
@@ -33,17 +34,24 @@ from .repair_engine import (
 )
 from .repair_plan import RepairPlan, build_repair_plan
 from .repair_store import AccessLedger, RepairStore
+from .repair_subscription import (
+    DEFAULT_PAGE_SIZE,
+    read_subscription_page,
+)
 
 __all__ = [
     "initialize_workspace",
     "apply_repair_batch",
     "read_release",
+    "enable_subscription",
+    "read_subscription",
     "load_repair_plan",
     "RepairWorkspace",
     "RepairPlan",
     "RepairBatch",
     "Correction",
     "RepairError",
+    "SubscriptionError",
 ]
 
 
@@ -132,6 +140,80 @@ def read_release(db_path: str,
         store.conn.close()
 
 
+def enable_subscription(db_path: str,
+                        graph_payload: Mapping[str, Any],
+                        retention: int) -> Dict[str, Any]:
+    """Enable the net-change subscription at the current release version.
+
+    ``retention`` is how many of the most recent successful publishes keep
+    their change deltas (at least 1).  The version at enable time becomes
+    the earliest consumable start; no history is fabricated for versions at
+    or before it, so existing workspaces enable in place without a
+    rebuild.  Enabling twice is rejected.
+    """
+    plan = build_repair_plan(graph_payload)
+    if not isinstance(retention, int) or isinstance(retention, bool) or \
+            retention < 1:
+        raise RepairValidationError(
+            f"subscription retention must be an integer >= 1, got "
+            f"{retention!r}"
+        )
+    store = _open_workspace(db_path, plan)
+    try:
+        engine = RepairEngine(store, plan)
+        engine.verify_graph_identity()
+        sub_id = secrets.token_hex(8)
+        try:
+            store.conn.execute("BEGIN IMMEDIATE")
+            if store.subscription_config() is not None:
+                raise SubscriptionError(
+                    "this workspace already has a release-change "
+                    "subscription; disabling or re-enabling is not "
+                    "supported",
+                    kind="already_enabled",
+                )
+            store.create_subscription_schema()
+            current = int(store.get_meta("version"))
+            store.enable_subscription_meta(current, retention, sub_id)
+            store.conn.commit()
+        except Exception:
+            store.conn.rollback()
+            raise
+        return {
+            "subscription": sub_id,
+            "enabled_at_version": current,
+            "retention": retention,
+            "earliest_from_version": current,
+        }
+    finally:
+        store.conn.close()
+
+
+def read_subscription(db_path: str,
+                      graph_payload: Mapping[str, Any],
+                      from_version: Optional[int] = None,
+                      cursor: Optional[str] = None,
+                      page_size: int = DEFAULT_PAGE_SIZE,
+                      ledger: Optional[AccessLedger] = None
+                      ) -> Dict[str, Any]:
+    """Read one page of net release-row changes (see repair_subscription).
+
+    First page: pass ``from_version`` (the consumer's fully synced
+    version); the target is pinned to the currently committed version.
+    Later pages: pass the ``cursor`` from the previous page.  The page
+    lists signed per-row copy changes between the two versions.
+    """
+    plan = build_repair_plan(graph_payload)
+    store = _open_workspace(db_path, plan, ledger)
+    try:
+        engine = RepairEngine(store, plan)
+        engine.verify_graph_identity()
+        return read_subscription_page(store, from_version=from_version,
+                                      cursor=cursor, page_size=page_size)
+    finally:
+        store.conn.close()
+
+
 class RepairWorkspace:
     """Long-lived handle for callers (and tests) keeping one connection open."""
 
@@ -165,6 +247,49 @@ class RepairWorkspace:
 
     def read_release(self) -> Tuple[int, List[Dict[str, Any]]]:
         return self.store.read_release()
+
+    def enable_subscription(self, retention: int) -> Dict[str, Any]:
+        """Enable the subscription on this open workspace (see the
+        module-level :func:`enable_subscription`)."""
+        if not isinstance(retention, int) or isinstance(retention, bool) \
+                or retention < 1:
+            raise RepairValidationError(
+                f"subscription retention must be an integer >= 1, got "
+                f"{retention!r}"
+            )
+        self.engine.verify_graph_identity()
+        sub_id = secrets.token_hex(8)
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            if self.store.subscription_config() is not None:
+                raise SubscriptionError(
+                    "this workspace already has a release-change "
+                    "subscription; disabling or re-enabling is not "
+                    "supported",
+                    kind="already_enabled",
+                )
+            self.store.create_subscription_schema()
+            current = int(self.store.get_meta("version"))
+            self.store.enable_subscription_meta(current, retention, sub_id)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return {
+            "subscription": sub_id,
+            "enabled_at_version": current,
+            "retention": retention,
+            "earliest_from_version": current,
+        }
+
+    def read_subscription(self, from_version: Optional[int] = None,
+                          cursor: Optional[str] = None,
+                          page_size: int = DEFAULT_PAGE_SIZE
+                          ) -> Dict[str, Any]:
+        """Read one net-change page on this open workspace."""
+        self.engine.verify_graph_identity()
+        return read_subscription_page(self.store, from_version=from_version,
+                                      cursor=cursor, page_size=page_size)
 
     def close(self) -> None:
         self.conn.close()
