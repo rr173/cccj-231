@@ -35,6 +35,9 @@ SQLite 工作区**里先物化初始发布，再以一批源行更正为单位�
   业务列都有索引；
 * `prov_<node>`：`(_sid, src_node, src_row_id, copies)` 多重集血缘，
   `copies` 记录份数，保证多对多扇出和投影后相同值的行各自保留；
+* `trace_<node>`（可选，仅建库时 `--trace` 启用）：`(_sid, role,
+  up_node, up_sid, up_row_id)` 实例级计算证据，见
+  [第 10 节](#10-单行溯源repair-trace)；
 * 视图 `release_rows`：`meta` 与出口表的连接，自带 `version` 列。
 
 ## 3. 读取发布行与版本号（同一事务/同一快照）
@@ -263,3 +266,126 @@ while page["has_more"]:
 可复跑的端到端示例（落后数版的消费者、份数减少未归零、跨版本抵消、
 业务行替换、取首页后又有新提交的两种情形、访问范围与失败注入）见
 `tests/test_repair_subscription.py`。
+
+## 10. 单行溯源（repair trace）
+
+结算人员拿到一行发布数据，要核实它是由哪些原始单据、经过哪些实际配对
+和汇总算出来的。列级诊断只能找到字段，订阅也只能说明行值份数变了多少；
+`repair trace` 回答的是**这一行每一份实际产出的计算证据**。
+
+### 10.1 启用：只在建库时，不迁移旧库
+
+```bash
+bin/lineage-diag repair init --graph graph.json --db ws.db \
+    --init initial.json --trace
+```
+
+* `--trace`（Python：`initialize_workspace(..., enable_trace=True)`）让
+  工作区在建库时为闭包内每个物化节点额外建一张 `trace_<node>` 证据表，
+  并在 `meta` 里落下 `trace=1`；
+* 溯源**只能**在建库时显式开启。已存在的工作区（包括本功能出现之前建
+  的）不会被迁移：对它们执行 `repair trace` 一律以
+  `kind="not_enabled"` 拒绝；
+* 建库后日常修复**不重扫全图、不重建全部证据**：引擎在逐行发出/删除物
+  化行时，于**同一事务**内逐行写入/删除对应证据，范围与该批已触及的
+  行完全一致（台账可证）；回滚的批次连证据一起回滚，绝不留下孤儿证据。
+
+证据表每行记录：某物化行消费了**哪一个直接上游实例**——
+
+| 节点 | 证据条目 |
+|---|---|
+| `project` / `output` | 一条 `in`，指向它实际使用的那一行 |
+| `join` | `left`、`right` 各一条，即使两侧最终追到同一张源表也可区分 |
+| `agg` | 每个实际吃进去的成员一条 `member`，可据此核对分组键、`SUM`、`COUNT(*)` |
+
+`prov_<node>` 回答不了这些问题：它把连接两侧和所有聚合成员合并成一个
+源行多重集，既分不出左右，也还原不出成员级结构。
+
+### 10.2 查询
+
+```bash
+bin/lineage-diag repair trace --graph graph.json --db ws.db \
+    --row '{"region":"R2","total_amt":60,"n":2,"bucket":"hot"}' \
+    --expected-version 3
+# 或 --row-file row.json
+```
+
+```python
+from lineage_diag import trace_release_row
+result = trace_release_row("ws.db", graph, row, expected_version=3)
+```
+
+* `row` 必须是**完整发布业务行**：全部发布列、按声明类型给值（TEXT 的
+  `"5"` 与 INTEGER 的 `5` 是不同的行）。少列（`missing_column`）、多列
+  （`extra_column`）、值类型不符（`type_mismatch`，含 null 和布尔）、
+  非对象（`bad_row`）都明确拒绝；
+* `expected_version` 必须等于当前已提交版本，否则 `stale_version`；格
+  式非法（非正整数）为 `invalid_version`。**不做历史版本查询**；
+* **合法但不存在的行不是错误**：返回 `matched: 0`、空的 `roots` 与
+  `instances`，并带回当前 `version`；
+* 一次查询的版本、发布实例、成员关系与源行值全部在**同一个读事务**里
+  取得，即同一份已提交状态；查询只定位匹配的发布实例并沿证据访问实际
+  用到的实例，不扫描无关分区、不重跑加工图。
+
+### 10.3 结果格式（可脚本读取）
+
+```json
+{
+  "version": 3,
+  "output_node": "o_release",
+  "row": {"region": "R2", "total_amt": 60, "n": 2, "bucket": "hot"},
+  "matched": 2,
+  "roots": ["e1", "e10"],
+  "instances": [
+    {"id": "e1", "node": "o_release", "kind": "output",
+     "values": {"region": "R2", "total_amt": 60, "n": 2, "bucket": "hot"},
+     "uses": [{"role": "in", "ref": "e2"}]},
+    {"id": "e2", "node": "j_target", "kind": "join",
+     "values": {"region": "R2", "target_region": "R2", "total_amt": 60,
+                "n": 2, "bucket": "hot"},
+     "uses": [{"role": "left", "ref": "e3"},
+              {"role": "right", "ref": "e4"}]},
+    {"id": "e3", "node": "a_region", "kind": "agg",
+     "values": {"region": "R2", "total_amt": 60, "n": 2},
+     "uses": [{"role": "member", "ref": "e5"},
+              {"role": "member", "ref": "e6"}]},
+    {"id": "e4", "node": "targets", "kind": "source", "row_id": "t2",
+     "values": {"region": "R2", "bucket": "hot"}}
+  ]
+}
+```
+
+* `matched` = 该行在当前版本的实际份数；`roots` 每份一个根证据标识，
+  **投影后所有值都相同的两份配对也各自独立交付，绝不合并**；
+* `instances` 是证据 DAG：`kind` 为 `output` / `project` / `join` /
+  `agg` / `source`；关系实例带当版行值 `values` 与 `uses` 边（`role`
+  ∈ `in` / `left` / `right` / `member`），源实例带源表节点 `node`、
+  源行 ID `row_id` 与当版行值——可从源表、源行、当版行值一路核对到
+  发布结果；
+* **同一个中间行同时供给多处时只交付一次**：它作为单个实例出现，其
+  在各处的使用关系和角色通过各消费方的 `uses` 边保留（DAG 而非按路
+  径展开的树）；
+* 核对聚合：`member` 边数 = `COUNT(*)`，逐成员取值求和 = `SUM`，分组
+  键就在 agg 实例的 `values` 里；
+* 证据标识（`e1`、`e2`…）**只在本次结果内可解引用**（`uses[].ref`），
+  不对外暴露内部行号，也不保证跨版本、跨查询稳定。
+
+### 10.4 与订阅的分工
+
+订阅回答"两个版本之间哪些业务行的份数变了"；溯源回答"这一行这一份是
+谁算出来的"。两者互补的典型情形：**换了一张原始单据但分组总额和笔数
+不变**时，订阅的净变更为空、发布行逐字节相同，而下一版的溯源证据必然
+指向新单据（证据随物化行一起按版重建）。`tests/test_repair_trace.py`
+的 DEMO 2 演示了这一幕。
+
+### 10.5 验证
+
+```bash
+python3 -I tests/test_repair_trace.py
+```
+
+覆盖：两条投影分支共用源表时同键行的实际左右配对（DEMO 1）；换单据不
+换合计时发布前后的证据归属（DEMO 2）；多层汇合下实例只交付一次、不展
+开成重复路径（DEMO 3，13 个实例 vs 24 次路径展开访问）；证据访问限于
+命中实例与必要成员（台账断言，含 80 个互不相干分区零触碰）；一次中途
+失败的更正不留任何证据；全部拒绝形态与"合法但不存在"的无匹配返回。

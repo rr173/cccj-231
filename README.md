@@ -194,3 +194,36 @@ bin/lineage-diag repair subscribe read --graph data/repair/graph.json \
     --db tmp/ws.db --cursor 'eyJ...'
 python3 -I tests/test_repair_subscription.py   # 可复跑的端到端示例
 ```
+
+## 10. 单行溯源（repair trace）
+
+结算人员拿到一行发布数据，要核实它是由哪些原始单据、经过哪些实际配对
+和汇总算出来的。建库时显式启用溯源（`repair init --trace`，只在建库时
+可开，旧库不迁移）后，可以用**完整发布业务行 + 当前发布版本**查询该行
+每一份实际产出的计算证据：
+
+```bash
+bin/lineage-diag repair init --graph data/repair/graph.json \
+    --db tmp/ws.db --init data/repair/initial.json --trace
+bin/lineage-diag repair apply --graph data/repair/graph.json \
+    --db tmp/ws.db --batch data/repair/batch1.json
+bin/lineage-diag repair trace --graph data/repair/graph.json \
+    --db tmp/ws.db \
+    --row '{"region":"R5","total_amt":30,"n":3,"bucket":"hot"}' \
+    --expected-version 2
+python3 -I tests/test_repair_trace.py   # 可复跑演示与回归
+```
+
+* 证据是实例级 DAG：投影/改名追到实际使用的那一行；连接区分左右两侧
+  （即使两侧追到同一张源表）；聚合保留实际吃进去的各份成员，可核对分
+  组键、`SUM`、`COUNT(*)`；值完全相同的两份配对各自独立交付；共享中间
+  行只交付一次但保留其在各处的使用关系和角色；
+* 匹配按全部发布列的原类型和值进行；合法但不存在的行返回该版本无匹
+  配，少列/多列/类型不符/未启用/版本不是当前版都明确拒绝；
+* 一次查询的版本、发布行、成员关系与源值来自同一个已提交状态；换单据
+  不换合计时下一版证据指向新单据；被拒绝或回滚的修复不留证据；
+* 日常修复只在同事务内维护本批触及行的证据，查询只访问命中的实例与必
+  要成员，不重扫全图、不按路径重复展开共享上游。
+
+结果格式、错误类别与三个聚焦演示（共用源表的左右配对、换单据不换合计、
+多层汇合不膨胀）见 [`docs/repair.md`](docs/repair.md#10-单行溯源repair-trace)。

@@ -56,9 +56,14 @@ from .repair_store import (
 
 _VALID_OPS = ("insert", "delete", "replace")
 Provenance = Dict[Tuple[str, str], int]
-# A row flowing inside the engine:
-#   source rows  -> (("src", row_id), values, provenance)
-#   relation rows -> ((sid:int,), values, provenance)
+# A row flowing inside the engine carries, besides its business values and
+# its source-row provenance, a *token* naming the immediate upstream
+# instance it was computed from:
+#   ("src", row_id)  - a source row of an input node
+#   ("rel", sid)     - a materialized row of a relation node
+# Tokens cost nothing when tracing is disabled and let the emitters record
+# instance-level evidence for the exact rows they write.
+RowToken = Tuple[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +211,8 @@ class RepairEngine:
     # Initial full materialization
     # ------------------------------------------------------------------
     def initialize(self,
-                   source_rows: Mapping[str, Sequence[Mapping[str, Any]]]
+                   source_rows: Mapping[str, Sequence[Mapping[str, Any]]],
+                   enable_trace: bool = False
                    ) -> int:
         self._check_uninitialized()
         missing = [nid for nid in self.plan.inputs if nid not in source_rows]
@@ -222,7 +228,7 @@ class RepairEngine:
 
         try:
             self.conn.execute("BEGIN IMMEDIATE")
-            self.store.create_schema()
+            self.store.create_schema(enable_trace=enable_trace)
             self.store.init_meta()
             for nid in self.plan.inputs:
                 rid_col = self.plan.row_ids[nid]
@@ -403,28 +409,31 @@ class RepairEngine:
             out = self._project(projs, values)
             sid = self.store.insert_rel(nid, out)
             self.store.insert_prov(nid, sid, dict(prov))
+            self._trace_insert(nid, sid, [("in", upstream_id, token)])
 
     def _full_join(self, nid: str) -> None:
         spec = self.plan.joins[nid]
         l_key = ColRef.parse(spec.left_key).column
         r_key = ColRef.parse(spec.right_key).column
-        right_index: Dict[str, List[Tuple[Dict[str, Any], Provenance]]] = {}
-        for values, prov in self._all_value_rows(spec.right):
+        right_index: Dict[str, List[Tuple[RowToken, Dict[str, Any],
+                                          Provenance]]] = {}
+        for token, values, prov in self._all_rows(spec.right):
             pkey = canonical_gkey([values[r_key]])
-            right_index.setdefault(pkey, []).append((values, prov))
-        for l_values, l_prov in self._all_value_rows(spec.left):
+            right_index.setdefault(pkey, []).append((token, values, prov))
+        for l_token, l_values, l_prov in self._all_rows(spec.left):
             pkey = canonical_gkey([l_values[l_key]])
-            for r_values, r_prov in right_index.get(pkey, ()):
+            for r_token, r_values, r_prov in right_index.get(pkey, ()):
                 self._emit_join_row(nid, spec, l_values, r_values,
-                                    l_prov, r_prov, pkey)
+                                    l_prov, r_prov, pkey, l_token, r_token)
 
     def _full_agg(self, nid: str) -> None:
         spec = self.plan.aggs[nid]
         g_cols = [ColRef.parse(g).column for g in spec.group_by]
-        groups: Dict[str, List[Tuple[Dict[str, Any], Provenance]]] = {}
-        for values, prov in self._all_value_rows(spec.input_node):
+        groups: Dict[str, List[Tuple[RowToken, Dict[str, Any],
+                                     Provenance]]] = {}
+        for token, values, prov in self._all_rows(spec.input_node):
             gkey = canonical_gkey([values[c] for c in g_cols])
-            groups.setdefault(gkey, []).append((values, prov))
+            groups.setdefault(gkey, []).append((token, values, prov))
         for gkey, members in groups.items():
             self._emit_agg_group(nid, spec, gkey, members)
 
@@ -491,6 +500,8 @@ class RepairEngine:
                 new_sid = self.store.insert_rel(nid, out)
                 self.store.insert_prov(nid, new_sid,
                                        {(upstream_id, rid): 1})
+                self._trace_insert(nid, new_sid,
+                                   [("in", upstream_id, ("src", rid))])
                 changes[nid].new_sids.append(new_sid)
         else:
             upstream_sids = self._upstream_sids_for_rebuild(
@@ -508,6 +519,8 @@ class RepairEngine:
                 new_sid = self.store.insert_rel(nid, out)
                 self.store.insert_prov(nid, new_sid,
                                        dict(up_prov[up_sid]))
+                self._trace_insert(nid, new_sid,
+                                   [("in", upstream_id, ("rel", up_sid))])
                 changes[nid].new_sids.append(new_sid)
 
     def _upstream_sids_for_rebuild(self, upstream_id: str,
@@ -626,11 +639,11 @@ class RepairEngine:
             left_rows = self._scoped_value_rows(spec.left, l_key, key_value)
             right_rows = self._scoped_value_rows(
                 spec.right, r_key, key_value)
-            for l_values, l_prov in left_rows:
-                for r_values, r_prov in right_rows:
+            for l_token, l_values, l_prov in left_rows:
+                for r_token, r_values, r_prov in right_rows:
                     new_sid = self._emit_join_row(
                         nid, spec, l_values, r_values,
-                        l_prov, r_prov, pkey)
+                        l_prov, r_prov, pkey, l_token, r_token)
                     changes[nid].new_sids.append(new_sid)
                     changes[nid].new_keys.append(pkey)
 
@@ -712,7 +725,8 @@ class RepairEngine:
     # ------------------------------------------------------------------
     def _scoped_value_rows(self, node_id: str, key_col: str,
                            key_value: Any
-                           ) -> List[Tuple[Dict[str, Any], Provenance]]:
+                           ) -> List[Tuple[RowToken, Dict[str, Any],
+                                           Provenance]]:
         """All current rows of node_id with key_col == key_value, with prov."""
         if node_id in self.plan.inputs:
             return self._scoped_source_rows(node_id, key_col, key_value)
@@ -728,7 +742,7 @@ class RepairEngine:
 
     def _scoped_group_members(
         self, node_id: str, g_cols: Sequence[str], gkey: str
-    ) -> List[Tuple[Dict[str, Any], Provenance]]:
+    ) -> List[Tuple[RowToken, Dict[str, Any], Provenance]]:
         gvals = json.loads(gkey)
         if node_id in self.plan.inputs:
             return self._scoped_source_group(node_id, g_cols, gvals, gkey)
@@ -741,7 +755,8 @@ class RepairEngine:
 
     def _scoped_source_rows(self, node_id: str, key_col: str,
                             key_value: Any
-                            ) -> List[Tuple[Dict[str, Any], Provenance]]:
+                            ) -> List[Tuple[RowToken, Dict[str, Any],
+                                            Provenance]]:
         rid_col = self.plan.row_ids[node_id]
         table = source_table(node_id)
         rows = self.conn.execute(
@@ -753,12 +768,14 @@ class RepairEngine:
         out = []
         for row in rows:
             values = {k: row[k] for k in row.keys() if k != rid_col}
-            out.append((values, {(node_id, row[rid_col]): 1}))
+            out.append((("src", row[rid_col]), values,
+                        {(node_id, row[rid_col]): 1}))
         return out
 
     def _scoped_source_group(self, node_id: str, g_cols: Sequence[str],
                              gvals: Sequence[Any], gkey: str
-                             ) -> List[Tuple[Dict[str, Any], Provenance]]:
+                             ) -> List[Tuple[RowToken, Dict[str, Any],
+                                             Provenance]]:
         rid_col = self.plan.row_ids[node_id]
         table = source_table(node_id)
         where = " AND ".join(f'"{c}" = ?' for c in g_cols)
@@ -767,7 +784,8 @@ class RepairEngine:
         ).fetchall()
         self.store.ledger.record("read_source", table, f"group={gkey}")
         return [
-            ({k: row[k] for k in row.keys() if k != rid_col},
+            (("src", row[rid_col]),
+             {k: row[k] for k in row.keys() if k != rid_col},
              {(node_id, row[rid_col]): 1})
             for row in rows
         ]
@@ -805,11 +823,13 @@ class RepairEngine:
         ]
 
     def _attach_provenance(self, node_id: str, members):
+        """Pair (sid, values) members with provenance; keep the sid token."""
         if not members:
             return []
         sids = [sid for sid, _ in members]
         prov_map = self.store.get_provenance(node_id, sids)
-        return [(values, prov_map[sid]) for sid, values in members]
+        return [(("rel", sid), values, prov_map[sid])
+                for sid, values in members]
 
     # ------------------------------------------------------------------
     # Taint helpers
@@ -845,8 +865,12 @@ class RepairEngine:
             return out
         sids = set(self._tainted_relation_sids(node_id, taint))
         sids |= self._changed_sids_for(node_id)
-        return self._attach_provenance(
-            node_id, self.store.get_rel_rows_by_sids(node_id, sorted(sids)))
+        members = self.store.get_rel_rows_by_sids(node_id, sorted(sids))
+        # Only values + provenance are needed for key collection; the
+        # instance token carried by _attach_provenance is dropped here.
+        return [(values, prov)
+                for _, values, prov in self._attach_provenance(
+                    node_id, members)]
 
     def _changed_sids_for(self, node_id: str) -> set:
         """Surrogates of node_id already (re)written by this batch.
@@ -874,16 +898,23 @@ class RepairEngine:
         prov_map = self.store.get_provenance(
             node_id, [sid for sid, _ in members])
         return [
-            ((sid,), values, prov_map[sid]) for sid, values in members
+            (("rel", sid), values, prov_map[sid]) for sid, values in members
         ]
-
-    def _all_value_rows(self, node_id: str
-                        ) -> List[Tuple[Dict[str, Any], Provenance]]:
-        return [(values, prov) for _, values, prov in self._all_rows(node_id)]
 
     # ------------------------------------------------------------------
     # Row builders
     # ------------------------------------------------------------------
+    def _trace_insert(self, nid: str, sid: int,
+                      entries: Sequence[Tuple[str, str, RowToken]]) -> None:
+        """Record instance evidence for one freshly written row (if on).
+
+        Evidence is written row-by-row as the engine emits rows, so a
+        repair batch only ever touches the evidence of the rows it already
+        deletes or inserts -- never a graph-wide rebuild.
+        """
+        if self.store.trace_enabled():
+            self.store.insert_trace(nid, sid, entries)
+
     @staticmethod
     def _project(projs: Sequence[Projection],
                  values: Mapping[str, Any]) -> Dict[str, Any]:
@@ -893,7 +924,8 @@ class RepairEngine:
                        l_values: Mapping[str, Any],
                        r_values: Mapping[str, Any],
                        l_prov: Provenance, r_prov: Provenance,
-                       key_value: Any) -> int:
+                       key_value: Any,
+                       l_token: RowToken, r_token: RowToken) -> int:
         out: Dict[str, Any] = {"_jkey": key_value}
         for p in self.plan.projections[nid]:
             source_values = l_values if p.source.node_id == spec.left \
@@ -902,13 +934,18 @@ class RepairEngine:
         sid = self.store.insert_rel(nid, out)
         self.store.insert_prov(nid, sid,
                                _merge_provenance(l_prov, r_prov))
+        self._trace_insert(nid, sid, [
+            ("left", spec.left, l_token),
+            ("right", spec.right, r_token),
+        ])
         return sid
 
     def _emit_agg_group(self, nid: str, spec: AggSpec, gkey: str,
-                        members: List[Tuple[Dict[str, Any], Provenance]]
+                        members: List[Tuple[RowToken, Dict[str, Any],
+                                            Provenance]]
                         ) -> int:
         out: Dict[str, Any] = {"_gkey": gkey}
-        first = members[0][0]
+        first = members[0][1]
         for g_ref, g_out in zip(spec.group_by, spec.group_outputs):
             out[g_out] = first[ColRef.parse(g_ref).column]
         for measure in spec.measures:
@@ -920,13 +957,16 @@ class RepairEngine:
                 value = len(members)
             else:
                 col = ColRef.parse(measure.ref).column
-                value = sum(values[col] for values, _ in members)
+                value = sum(values[col] for _, values, _ in members)
             out[measure.out_column] = value
         sid = self.store.insert_rel(nid, out)
         merged: Provenance = {}
-        for _, prov in members:
+        for _, _, prov in members:
             merged = _merge_provenance(merged, prov)
         self.store.insert_prov(nid, sid, merged)
+        self._trace_insert(nid, sid, [
+            ("member", spec.input_node, token) for token, _, _ in members
+        ])
         return sid
 
 

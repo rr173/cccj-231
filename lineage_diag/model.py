@@ -48,6 +48,34 @@ class RepairConflictError(RepairError):
     """
 
 
+class TraceError(RepairError):
+    """A single-row release-trace query was rejected.
+
+    ``kind`` is a stable machine-readable tag so scripts can branch on it:
+
+    * ``not_enabled``     - the workspace was not built with tracing
+                            (``repair init --trace``); tracing is only
+                            available on workspaces that opted in at build
+                            time, never retrofitted onto existing ones;
+    * ``invalid_version`` - the expected version is not a positive integer;
+    * ``stale_version``   - the expected version is not the currently
+                            committed version (no historical queries);
+    * ``bad_row``         - the release row is not a JSON object;
+    * ``missing_column``  - one or more release columns are absent;
+    * ``extra_column``    - columns beyond the release schema were given;
+    * ``type_mismatch``   - a value's type does not match the declared
+                            release column type (nulls and booleans
+                            included).
+
+    A well-formed row that simply does not exist at the current version is
+    NOT an error: the query succeeds and reports zero matched copies.
+    """
+
+    def __init__(self, message: str, kind: str = "bad_row"):
+        super().__init__(message)
+        self.kind = kind
+
+
 class SubscriptionError(RepairError):
     """A release-change subscription operation was rejected.
 

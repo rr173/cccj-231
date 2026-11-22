@@ -4,7 +4,9 @@
 Suites:
   * build_fixture / verify_independent / run_reports - original diagnostics;
   * build_repair_fixture + test_repair - local repair core invariants;
-  * test_repair_shapes - integer keys, multi-column groups, chained aggs.
+  * test_repair_shapes - integer keys, multi-column groups, chained aggs;
+  * test_repair_subscription - net-change subscription protocol;
+  * test_repair_trace - single-row release tracing (instance evidence).
 """
 
 import os
@@ -21,6 +23,7 @@ STEPS = [
     ["tests/test_repair.py"],
     ["tests/test_repair_shapes.py"],
     ["tests/test_repair_subscription.py"],
+    ["tests/test_repair_trace.py"],
 ]
 
 

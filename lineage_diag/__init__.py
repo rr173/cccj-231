@@ -24,6 +24,7 @@ from .model import (
     RepairError,
     RepairValidationError,
     SubscriptionError,
+    TraceError,
 )
 from .repair import (
     Correction,
@@ -36,6 +37,7 @@ from .repair import (
     load_repair_plan,
     read_release,
     read_subscription,
+    trace_release_row,
 )
 from .repair_store import AccessLedger
 
@@ -61,6 +63,7 @@ __all__ = [
     "read_release",
     "enable_subscription",
     "read_subscription",
+    "trace_release_row",
     "load_repair_plan",
     "RepairWorkspace",
     "RepairPlan",
@@ -71,4 +74,5 @@ __all__ = [
     "RepairValidationError",
     "RepairConflictError",
     "SubscriptionError",
+    "TraceError",
 ]

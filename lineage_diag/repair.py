@@ -24,7 +24,8 @@ import secrets
 import sqlite3
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .model import RepairError, RepairValidationError, SubscriptionError
+from .model import RepairError, RepairValidationError, SubscriptionError, \
+    TraceError
 from .repair_engine import (
     Correction,
     Failpoint,
@@ -38,6 +39,7 @@ from .repair_subscription import (
     DEFAULT_PAGE_SIZE,
     read_subscription_page,
 )
+from .repair_trace import trace_row_in_store
 
 __all__ = [
     "initialize_workspace",
@@ -45,6 +47,7 @@ __all__ = [
     "read_release",
     "enable_subscription",
     "read_subscription",
+    "trace_release_row",
     "load_repair_plan",
     "RepairWorkspace",
     "RepairPlan",
@@ -52,6 +55,7 @@ __all__ = [
     "Correction",
     "RepairError",
     "SubscriptionError",
+    "TraceError",
 ]
 
 
@@ -62,13 +66,19 @@ def load_repair_plan(graph_payload: Mapping[str, Any]) -> RepairPlan:
 
 def initialize_workspace(db_path: str,
                          graph_payload: Mapping[str, Any],
-                         initial_payload: Mapping[str, Any]
+                         initial_payload: Mapping[str, Any],
+                         enable_trace: bool = False
                          ) -> Tuple[RepairPlan, int]:
     """Create *db_path*, load initial source rows and materialize version 1.
 
     ``initial_payload`` is either ``{"sources": {node_id: [rows]}}`` or the
     bare ``{node_id: [rows]}`` mapping.  Fails if the database file already
     contains a workspace; nothing is created on validation failure.
+
+    ``enable_trace=True`` additionally maintains instance-level computation
+    evidence (``trace_<node>`` tables) so single release rows can later be
+    traced with :func:`trace_release_row`.  Tracing can only be switched on
+    here, at build time; existing workspaces are never migrated.
     """
     plan = build_repair_plan(graph_payload)
     sources = _extract_sources(initial_payload, plan)
@@ -77,7 +87,7 @@ def initialize_workspace(db_path: str,
     try:
         store = RepairStore(conn, plan, ledger)
         engine = RepairEngine(store, plan)
-        version = engine.initialize(sources)
+        version = engine.initialize(sources, enable_trace=enable_trace)
     except Exception:
         conn.close()
         raise
@@ -136,6 +146,32 @@ def read_release(db_path: str,
     store = _open_workspace(db_path, plan)
     try:
         return store.read_release()
+    finally:
+        store.conn.close()
+
+
+def trace_release_row(db_path: str,
+                      graph_payload: Mapping[str, Any],
+                      row: Mapping[str, Any],
+                      expected_version: int,
+                      ledger: Optional[AccessLedger] = None
+                      ) -> Dict[str, Any]:
+    """Trace every physical copy of one release row to its evidence.
+
+    ``row`` must map every release column to its value (matched with the
+    declared types) and ``expected_version`` must be the currently
+    committed version.  Returns the script-readable evidence DAG described
+    in :mod:`lineage_diag.repair_trace`; a well-formed but absent row
+    yields ``matched: 0``.  Raises :class:`TraceError` (with a
+    machine-readable ``kind``) for malformed rows, stale versions or
+    workspaces built without tracing.
+    """
+    plan = build_repair_plan(graph_payload)
+    store = _open_workspace(db_path, plan, ledger)
+    try:
+        engine = RepairEngine(store, plan)
+        engine.verify_graph_identity()
+        return trace_row_in_store(store, plan, row, expected_version)
     finally:
         store.conn.close()
 
@@ -236,9 +272,10 @@ class RepairWorkspace:
                     f"{db_path!r} is not an initialized repair workspace")
         self.engine = RepairEngine(self.store, plan)
 
-    def initialize(self, initial_payload: Mapping[str, Any]) -> int:
+    def initialize(self, initial_payload: Mapping[str, Any],
+                   enable_trace: bool = False) -> int:
         sources = _extract_sources(initial_payload, self.plan)
-        return self.engine.initialize(sources)
+        return self.engine.initialize(sources, enable_trace=enable_trace)
 
     def apply(self, batch_payload: Mapping[str, Any],
               failpoint: Failpoint = None) -> Dict[str, Any]:
@@ -247,6 +284,14 @@ class RepairWorkspace:
 
     def read_release(self) -> Tuple[int, List[Dict[str, Any]]]:
         return self.store.read_release()
+
+    def trace_row(self, row: Mapping[str, Any],
+                  expected_version: int) -> Dict[str, Any]:
+        """Trace one release row on this open workspace (see the
+        module-level :func:`trace_release_row`)."""
+        self.engine.verify_graph_identity()
+        return trace_row_in_store(self.store, self.plan, row,
+                                  expected_version)
 
     def enable_subscription(self, retention: int) -> Dict[str, Any]:
         """Enable the subscription on this open workspace (see the

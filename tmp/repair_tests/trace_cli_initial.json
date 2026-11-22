@@ -1,0 +1,1 @@
+{"sources": {"orders": [{"order_id": "o3", "acc_id": "A", "region": "R2", "amount": 30}], "accounts": [{"acc_pk": "a1", "acc_id": "A", "owner": "ann"}, {"acc_pk": "a2", "acc_id": "A", "owner": "ann2"}], "targets": [{"target_id": "t2", "region": "R2", "bucket": "hot"}]}}

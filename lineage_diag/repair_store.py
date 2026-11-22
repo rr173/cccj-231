@@ -10,9 +10,17 @@ One workspace is one SQLite database.  It holds:
   intermediate / output node, with a surrogate ``_sid`` and, for join/agg
   nodes, the hidden partition key (``_jkey`` / ``_gkey``) used for indexed
   scoped re-reads;
-* ``prov_<node>``     - (surrogate row, source node, source row id, copies)
+* ``prov_<node>`     - (surrogate row, source node, source row id, copies)
   multiset provenance.  ``copies`` keeps multiplicity so duplicate rows and
-  many-to-many join fan-out preserve every contribution.
+  many-to-many join fan-out preserve every contribution;
+* ``trace_<node>``   - OPTIONAL instance-level computation evidence, created
+  only when the workspace is built with tracing enabled.  One row per
+  (materialized row, consumed upstream instance): projections record their
+  single input instance, joins record the left and the right instance
+  separately, aggregates record one row per consumed member.  This is what
+  single-row release tracing walks; plain ``prov_<node>`` cannot answer it
+  because it merges both join sides and all aggregate members into one
+  source-row multiset.
 
 All reads issued by the repair engine go through the accessor methods below,
 which also append entries to an :class:`AccessLedger`.  Tests replay the
@@ -45,6 +53,8 @@ OP_SCAN = "full_scan"                   # whole-table scan (init only)
 OP_SQL = "sql"                          # raw executed statement (trace)
 OP_READ_SUB = "read_sub_delta"          # subscription delta page read
 OP_WRITE_SUB = "write_sub_delta"        # subscription delta write / gc
+OP_READ_TRACE = "read_trace"            # instance evidence read (trace walk)
+OP_WRITE_TRACE = "write_trace"          # instance evidence write / delete
 
 SUB_DELTA_TABLE = "sub_delta"
 
@@ -103,6 +113,10 @@ def prov_table(node_id: str) -> str:
     return f"prov_{node_id}"
 
 
+def trace_table(node_id: str) -> str:
+    return f"trace_{node_id}"
+
+
 @dataclass(frozen=True)
 class SubscriptionConfig:
     """Subscription parameters committed in ``meta`` at enable time."""
@@ -154,6 +168,9 @@ class RepairStore:
         self.conn = conn
         self.plan = plan
         self.ledger = ledger or AccessLedger()
+        # None = not yet determined (lazy meta lookup); create_schema sets it
+        # directly because the meta table does not exist before that point.
+        self._trace_enabled: Optional[bool] = None
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.set_trace_callback(self._trace)
@@ -177,7 +194,7 @@ class RepairStore:
     # ------------------------------------------------------------------
     # DDL
     # ------------------------------------------------------------------
-    def create_schema(self) -> None:
+    def create_schema(self, enable_trace: bool = False) -> None:
         c = self.conn
         c.execute(
             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -189,11 +206,14 @@ class RepairStore:
                 continue
             self._create_rel_table(nid)
             self._create_prov_table(nid)
+            if enable_trace:
+                self._create_trace_table(nid)
         c.execute(
             "CREATE VIEW release_rows AS SELECT m.value AS version, r.* "
             f"FROM meta m CROSS JOIN {_ident(rel_table(self.plan.output_node_id))} r "
             "WHERE m.key = 'version'"
         )
+        self._trace_enabled = enable_trace
 
     def _create_source_table(self, nid: str) -> None:
         row_id = self.plan.row_ids[nid]
@@ -257,6 +277,32 @@ class RepairStore:
             f"{_ident(prov_table(nid))}(src_node, src_row_id)"
         )
 
+    def _create_trace_table(self, nid: str) -> None:
+        """Instance-level evidence for one materialized node.
+
+        Each row says: materialized row ``_sid`` of this node consumed
+        exactly one upstream instance, identified by ``up_node`` plus
+        either ``up_sid`` (upstream is a materialized relation) or
+        ``up_row_id`` (upstream is an input source row).  ``role`` records
+        how the instance was used: ``in`` (project/output), ``left`` /
+        ``right`` (join sides) or ``member`` (aggregate input).  The
+        ``_sid`` index lets a trace walk fetch one instance's evidence
+        without touching any other partition.
+        """
+        self.conn.execute(
+            f"CREATE TABLE {_ident(trace_table(nid))} ("
+            "_sid INTEGER NOT NULL, "
+            "role TEXT NOT NULL, "
+            "up_node TEXT NOT NULL, "
+            "up_sid INTEGER, "
+            "up_row_id TEXT, "
+            "CHECK ((up_sid IS NULL) <> (up_row_id IS NULL)))"
+        )
+        self.conn.execute(
+            f"CREATE INDEX {_ident('ix_' + nid + '_trace_sid')} ON "
+            f"{_ident(trace_table(nid))}(_sid)"
+        )
+
     # ------------------------------------------------------------------
     # Meta
     # ------------------------------------------------------------------
@@ -268,10 +314,21 @@ class RepairStore:
             "schema_version": str(SCHEMA_VERSION),
             "output_node": self.plan.output_node_id,
         }
+        if self._trace_enabled:
+            # Absence of this key means tracing is unavailable; workspaces
+            # built before tracing existed (or without opting in) carry no
+            # key and are rejected by trace queries instead of migrated.
+            meta["trace"] = "1"
         self.conn.executemany(
             "INSERT INTO meta(key, value) VALUES (?, ?)",
             list(meta.items()),
         )
+
+    def trace_enabled(self) -> bool:
+        """Whether this workspace was built with instance-level evidence."""
+        if self._trace_enabled is None:
+            self._trace_enabled = self.get_meta("trace") == "1"
+        return self._trace_enabled
 
     def get_meta(self, key: str) -> Optional[str]:
         row = self.conn.execute(
@@ -374,6 +431,11 @@ class RepairStore:
         )
         for sid in sids:
             self.ledger.record(OP_DELETE_REL, table, str(sid))
+        if self.trace_enabled():
+            # Evidence dies with the row it describes, inside the same
+            # transaction, so a rollback never leaves orphan evidence and a
+            # committed version never shows stale pairings.
+            self.delete_trace_sids(nid, sids)
 
     def delete_prov_sids(self, nid: str, sids: Sequence[int]) -> None:
         if not sids:
@@ -495,6 +557,95 @@ class RepairStore:
             out.setdefault(sid, {})[(row["src_node"],
                                      row["src_row_id"])] = int(row["copies"])
         return out
+
+    # ------------------------------------------------------------------
+    # Instance-level trace evidence
+    # ------------------------------------------------------------------
+    def insert_trace(self, nid: str, sid: int,
+                     entries: Sequence[Tuple[str, str, Tuple[str, Any]]]
+                     ) -> None:
+        """Record which upstream instances one materialized row consumed.
+
+        ``entries`` are ``(role, up_node, token)`` triples where ``token``
+        is ``("rel", upstream_sid)`` or ``("src", source_row_id)``.
+        """
+        if not entries:
+            return
+        table = trace_table(nid)
+        rows = []
+        for role, up_node, token in entries:
+            kind, ref = token
+            rows.append((sid, role, up_node,
+                         ref if kind == "rel" else None,
+                         ref if kind == "src" else None))
+        self.conn.executemany(
+            f"INSERT INTO {_ident(table)}"
+            "(_sid, role, up_node, up_sid, up_row_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        self.ledger.record(OP_WRITE_TRACE, table, str(sid))
+
+    def delete_trace_sids(self, nid: str, sids: Sequence[int]) -> None:
+        if not sids:
+            return
+        table = trace_table(nid)
+        qmarks = ", ".join("?" for _ in sids)
+        self.conn.execute(
+            f"DELETE FROM {_ident(table)} WHERE _sid IN ({qmarks})",
+            list(sids),
+        )
+        for sid in sids:
+            self.ledger.record(OP_WRITE_TRACE, table, f"delete:{sid}")
+
+    def get_trace(self, nid: str, sid: int
+                  ) -> List[Tuple[str, str, Optional[int], Optional[str]]]:
+        """One instance's evidence rows, fetched by its own id only.
+
+        Returns ``(role, up_node, up_sid, up_row_id)`` tuples in a
+        deterministic order.  Exactly one of ``up_sid`` / ``up_row_id`` is
+        non-NULL per row.
+        """
+        table = trace_table(nid)
+        rows = self.conn.execute(
+            f"SELECT role, up_node, up_sid, up_row_id FROM {_ident(table)} "
+            "WHERE _sid = ? ORDER BY role, up_node, up_sid, up_row_id",
+            (sid,),
+        ).fetchall()
+        self.ledger.record(OP_READ_TRACE, table, str(sid))
+        return [
+            (row["role"], row["up_node"],
+             int(row["up_sid"]) if row["up_sid"] is not None else None,
+             row["up_row_id"])
+            for row in rows
+        ]
+
+    def find_release_instances(self, values: Mapping[str, Any]) -> List[int]:
+        """Surrogate ids of release rows equal to *values*, type-strictly.
+
+        Every release column participates with its declared type: the
+        ``typeof(...) = typeof(?)`` guard keeps TEXT ``"5"`` and INTEGER
+        ``5`` distinct, which a bare ``=`` (column affinity) would not.
+        The equality predicates use the per-column indexes, so unrelated
+        partitions are never scanned.
+        """
+        nid = self.plan.output_node_id
+        cols = self.plan.columns[nid]
+        table = rel_table(nid)
+        where = " AND ".join(
+            f"{_ident(c)} = ? AND typeof({_ident(c)}) = typeof(?)"
+            for c in cols
+        )
+        params: List[Any] = []
+        for c in cols:
+            params.extend((values[c], values[c]))
+        rows = self.conn.execute(
+            f"SELECT _sid FROM {_ident(table)} WHERE {where} ORDER BY _sid",
+            params,
+        ).fetchall()
+        self.ledger.record(OP_READ_REL, table,
+                           f"match:{release_row_key(cols, values)}")
+        return [int(row["_sid"]) for row in rows]
 
     # ------------------------------------------------------------------
     # Release read
