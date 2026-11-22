@@ -1,0 +1,153 @@
+{
+  "graph_version": "graph-7",
+  "run_version": "run-77",
+  "package_digest": "f377444c27206365fe90f8483af840def660b397ecda148cb48da704a23bdbbe",
+  "nodes": {
+    "t1": {
+      "executed": true,
+      "read_positive": [
+        "t1.uid",
+        "t1.amount",
+        "t1.region",
+        "t1.overseas_flag"
+      ],
+      "read_negative": []
+    },
+    "t2": {
+      "executed": true,
+      "read_positive": [
+        "t2.uid",
+        "t2.owner_id",
+        "t2.country",
+        "t2.country_code"
+      ],
+      "read_negative": []
+    },
+    "t3": {
+      "executed": true,
+      "read_positive": [
+        "t3.uid",
+        "t3.tags"
+      ],
+      "read_negative": []
+    },
+    "p_filt": {
+      "executed": true,
+      "read_positive": [
+        "p_filt.amount",
+        "p_filt.region",
+        "p_filt.overseas_flag"
+      ],
+      "read_negative": []
+    },
+    "j_user": {
+      "executed": true,
+      "read_positive": [
+        "j_user.uid_copy",
+        "j_user.owner_id",
+        "j_user.amount",
+        "j_user.region",
+        "j_user.country",
+        "j_user.overseas_flag"
+      ],
+      "read_negative": [],
+      "read_negative_refs": [
+        "t2.country_code"
+      ]
+    },
+    "a_sum": {
+      "executed": true,
+      "read_positive": [
+        "a_sum.total_amt",
+        "a_sum.region",
+        "a_sum.country"
+      ],
+      "read_negative": []
+    },
+    "b_gate": {
+      "executed": true,
+      "branches_taken": [],
+      "branches_skipped": [
+        "b1"
+      ],
+      "read_positive": [],
+      "read_negative": []
+    },
+    "p_over": {
+      "executed": false,
+      "branches_taken": [],
+      "branches_skipped": [],
+      "read_positive": [],
+      "read_negative": [
+        "p_over.overseas_flag"
+      ]
+    },
+    "e_tags": {
+      "executed": true,
+      "read_positive": [
+        "e_tags.tag_name"
+      ],
+      "read_negative": []
+    },
+    "p_agg": {
+      "executed": true,
+      "read_positive": [
+        "p_agg.total_amt",
+        "p_agg.region",
+        "p_agg.country"
+      ],
+      "read_negative": []
+    },
+    "p_dbg": {
+      "executed": true,
+      "read_positive": [
+        "p_dbg.dbg_audit"
+      ],
+      "read_negative": []
+    },
+    "b_route": {
+      "executed": true,
+      "branches_taken": [
+        "take_exec"
+      ],
+      "branches_skipped": [
+        "skip_emit"
+      ],
+      "read_positive": [],
+      "read_negative": []
+    },
+    "o_rel": {
+      "executed": true,
+      "read_positive": [
+        "o_rel.uid_copy",
+        "o_rel.total_amt",
+        "o_rel.region",
+        "o_rel.country",
+        "o_rel.owner_id",
+        "o_rel.tag_name",
+        "o_rel.note",
+        "o_rel.overseas_flag"
+      ],
+      "read_negative": []
+    },
+    "o_dead": {
+      "executed": false,
+      "read_positive": [],
+      "read_negative": [
+        "o_dead.would_be"
+      ]
+    }
+  },
+  "output_samples": {
+    "o_rel": {
+      "uid_copy": "96537053658bf513cffbeb9a339f0a1055857c1d371dd66e645e1847b5d6b92e",
+      "total_amt": "e87fd55a114046477226b619599a6d1592161cbdd701bbd1b6c9c08c5205eb75",
+      "region": "04f1b03814c9d02848effcf88d4e24dc62791491eb88cd80f501e3f435623a68",
+      "country": "e43f4da97003637601d206cf62e1739da9c72cbdedf935bdbe662b5fc4461177",
+      "owner_id": "00003469211d6dc6433d84f064b3cce9a6f07d491476de963cf231bede907555",
+      "tag_name": "0b3298ce311e567016833e2ea64067ac163d171bad5a3e69b4203a580cf19663",
+      "note": "96246ab0453fb18d6a5964f750a0ab21ed57cda56b681d06ec8dcccd19fdf2f0",
+      "overseas_flag": "053814160be17086032074ff116f8f9a4d8cdc1722adb9296c493ae6ad4300f5"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+#!/usr/bin/env -S python3 -I
+"""Isolated launcher for the lineage diagnostic CLI.
+
+``-I`` ensures a planted json.py / lineage_diag.py next to the data files
+cannot be imported; the package path is inserted explicitly.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from lineage_diag.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

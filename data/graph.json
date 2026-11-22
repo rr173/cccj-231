@@ -1,0 +1,450 @@
+{
+  "graph_version": "graph-7",
+  "nodes": [
+    {
+      "id": "t1",
+      "type": "input",
+      "table": "db.orders",
+      "columns": [
+        {
+          "name": "uid"
+        },
+        {
+          "name": "amount"
+        },
+        {
+          "name": "region"
+        },
+        {
+          "name": "overseas_flag"
+        }
+      ]
+    },
+    {
+      "id": "t2",
+      "type": "input",
+      "table": "db.users",
+      "columns": [
+        {
+          "name": "uid"
+        },
+        {
+          "name": "owner_id"
+        },
+        {
+          "name": "country"
+        },
+        {
+          "name": "country_code"
+        }
+      ]
+    },
+    {
+      "id": "t3",
+      "type": "input",
+      "table": "db.user_tags",
+      "columns": [
+        {
+          "name": "uid"
+        },
+        {
+          "name": "tags"
+        }
+      ]
+    },
+    {
+      "id": "p_filt",
+      "type": "project",
+      "input": "t1",
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "uid",
+          "refs": [
+            "t1.uid"
+          ],
+          "raw": "t1.uid"
+        },
+        {
+          "kind": "op",
+          "op": ">",
+          "out_column": "amount",
+          "refs": [
+            "t1.amount"
+          ],
+          "raw": "t1.amount > 0"
+        },
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "t1.region"
+          ],
+          "raw": "t1.region"
+        },
+        {
+          "kind": "ref",
+          "out_column": "overseas_flag",
+          "refs": [
+            "t1.overseas_flag"
+          ],
+          "raw": "t1.overseas_flag"
+        }
+      ]
+    },
+    {
+      "id": "j_user",
+      "type": "join",
+      "left": "p_filt",
+      "right": "t2",
+      "on": [
+        {
+          "kind": "op",
+          "op": "=",
+          "out_column": "_on_uid",
+          "refs": [
+            "p_filt.uid",
+            "t2.uid"
+          ],
+          "raw": "p_filt.uid = t2.uid",
+          "role_override": "join_on"
+        }
+      ],
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "uid",
+          "refs": [
+            "t2.uid"
+          ],
+          "raw": "t2.uid AS uid"
+        },
+        {
+          "kind": "ref",
+          "out_column": "uid_copy",
+          "refs": [
+            "p_filt.uid"
+          ],
+          "raw": "p_filt.uid AS uid_copy"
+        },
+        {
+          "kind": "op",
+          "op": "coalesce",
+          "out_column": "owner_id",
+          "refs": [
+            "t2.owner_id",
+            "p_filt.uid"
+          ],
+          "raw": "coalesce(t2.owner_id, p_filt.uid)"
+        },
+        {
+          "kind": "ref",
+          "out_column": "amount",
+          "refs": [
+            "p_filt.amount"
+          ],
+          "raw": "p_filt.amount"
+        },
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "p_filt.region"
+          ],
+          "raw": "p_filt.region"
+        },
+        {
+          "kind": "op",
+          "op": "coalesce",
+          "out_column": "country",
+          "refs": [
+            "t2.country",
+            "t2.country_code"
+          ],
+          "raw": "coalesce(t2.country, t2.country_code)"
+        },
+        {
+          "kind": "ref",
+          "out_column": "overseas_flag",
+          "refs": [
+            "p_filt.overseas_flag"
+          ],
+          "raw": "p_filt.overseas_flag"
+        }
+      ]
+    },
+    {
+      "id": "a_sum",
+      "type": "agg",
+      "input": "j_user",
+      "exprs": [
+        {
+          "kind": "op",
+          "op": "sum",
+          "out_column": "total_amt",
+          "refs": [
+            "j_user.amount"
+          ],
+          "raw": "sum(j_user.amount)"
+        },
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "j_user.region"
+          ],
+          "raw": "j_user.region (group key)"
+        },
+        {
+          "kind": "ref",
+          "out_column": "country",
+          "refs": [
+            "j_user.country"
+          ],
+          "raw": "j_user.country (group key)"
+        }
+      ]
+    },
+    {
+      "id": "b_gate",
+      "type": "branch",
+      "input": "j_user",
+      "condition": [
+        {
+          "kind": "op",
+          "op": "=",
+          "out_column": "_cond",
+          "refs": [
+            "j_user.overseas_flag"
+          ],
+          "raw": "j_user.overseas_flag = 1"
+        }
+      ],
+      "branches": [
+        {
+          "id": "b1",
+          "target": "p_over",
+          "label": "overseas detail"
+        }
+      ]
+    },
+    {
+      "id": "p_over",
+      "type": "project",
+      "input": "j_user",
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "overseas_flag",
+          "refs": [
+            "j_user.overseas_flag"
+          ],
+          "raw": "j_user.overseas_flag"
+        }
+      ]
+    },
+    {
+      "id": "e_tags",
+      "type": "explode",
+      "input": "t3",
+      "ref": "t3.tags",
+      "out_column": "tag_name",
+      "passthrough": [
+        {
+          "kind": "ref",
+          "out_column": "uid",
+          "refs": [
+            "t3.uid"
+          ],
+          "raw": "t3.uid"
+        }
+      ]
+    },
+    {
+      "id": "p_agg",
+      "type": "project",
+      "input": "a_sum",
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "total_amt",
+          "refs": [
+            "a_sum.total_amt"
+          ],
+          "raw": "a_sum.total_amt"
+        },
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "a_sum.region"
+          ],
+          "raw": "a_sum.region"
+        },
+        {
+          "kind": "op",
+          "op": "upper",
+          "out_column": "country",
+          "refs": [
+            "a_sum.country"
+          ],
+          "raw": "upper(a_sum.country)"
+        }
+      ]
+    },
+    {
+      "id": "p_note",
+      "type": "project",
+      "input": "j_user",
+      "exprs": [
+        {
+          "kind": "op",
+          "op": "lower",
+          "out_column": "note",
+          "refs": [
+            "j_user.country"
+          ],
+          "raw": "lower(j_user.country)"
+        }
+      ]
+    },
+    {
+      "id": "p_dbg",
+      "type": "project",
+      "input": "j_user",
+      "exprs": [
+        {
+          "kind": "op",
+          "op": "hash",
+          "out_column": "dbg_audit",
+          "refs": [
+            "j_user.uid"
+          ],
+          "raw": "hash(j_user.uid) -- audit only, never released"
+        }
+      ]
+    },
+    {
+      "id": "b_route",
+      "type": "branch",
+      "input": "p_agg",
+      "condition": [
+        {
+          "kind": "op",
+          "op": "is_not_null",
+          "out_column": "_cond",
+          "refs": [
+            "p_agg.total_amt"
+          ],
+          "raw": "p_agg.total_amt is not null"
+        }
+      ],
+      "branches": [
+        {
+          "id": "take_exec",
+          "target": "o_rel",
+          "label": "emit release rows"
+        },
+        {
+          "id": "skip_emit",
+          "target": "o_dead",
+          "label": "suppressed alternative"
+        }
+      ]
+    },
+    {
+      "id": "o_rel",
+      "type": "output",
+      "table": "release_user_metrics",
+      "input": "p_agg",
+      "extra_inputs": [
+        "j_user",
+        "e_tags",
+        "p_note",
+        "p_over"
+      ],
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "uid_copy",
+          "refs": [
+            "j_user.uid_copy"
+          ],
+          "raw": "j_user.uid_copy"
+        },
+        {
+          "kind": "ref",
+          "out_column": "total_amt",
+          "refs": [
+            "p_agg.total_amt"
+          ],
+          "raw": "p_agg.total_amt"
+        },
+        {
+          "kind": "ref",
+          "out_column": "region",
+          "refs": [
+            "p_agg.region"
+          ],
+          "raw": "p_agg.region"
+        },
+        {
+          "kind": "ref",
+          "out_column": "country",
+          "refs": [
+            "p_agg.country"
+          ],
+          "raw": "p_agg.country"
+        },
+        {
+          "kind": "ref",
+          "out_column": "owner_id",
+          "refs": [
+            "j_user.owner_id"
+          ],
+          "raw": "j_user.owner_id"
+        },
+        {
+          "kind": "ref",
+          "out_column": "tag_name",
+          "refs": [
+            "e_tags.tag_name"
+          ],
+          "raw": "e_tags.tag_name"
+        },
+        {
+          "kind": "ref",
+          "out_column": "note",
+          "refs": [
+            "p_note.note"
+          ],
+          "raw": "p_note.note"
+        },
+        {
+          "kind": "ref",
+          "out_column": "overseas_flag",
+          "refs": [
+            "p_over.overseas_flag"
+          ],
+          "raw": "p_over.overseas_flag"
+        }
+      ]
+    },
+    {
+      "id": "o_dead",
+      "type": "output",
+      "table": "release_suppressed",
+      "input": "p_agg",
+      "exprs": [
+        {
+          "kind": "ref",
+          "out_column": "would_be",
+          "refs": [
+            "p_agg.total_amt"
+          ],
+          "raw": "p_agg.total_amt"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "package_name": "release_user_metrics",
+  "package_version": "2026.11.0",
+  "graph_version": "graph-7",
+  "run_version": "run-77",
+  "output_node": "o_rel",
+  "columns": [
+    {
+      "name": "uid_copy",
+      "type": "BIGINT",
+      "sample_digest": "96537053658bf513cffbeb9a339f0a1055857c1d371dd66e645e1847b5d6b92e"
+    },
+    {
+      "name": "total_amt",
+      "type": "DECIMAL(18,2)",
+      "sample_digest": "e87fd55a114046477226b619599a6d1592161cbdd701bbd1b6c9c08c5205eb75"
+    },
+    {
+      "name": "region",
+      "type": "VARCHAR(32)",
+      "sample_digest": "04f1b03814c9d02848effcf88d4e24dc62791491eb88cd80f501e3f435623a68"
+    },
+    {
+      "name": "country",
+      "type": "VARCHAR(64)",
+      "sample_digest": "e43f4da97003637601d206cf62e1739da9c72cbdedf935bdbe662b5fc4461177"
+    },
+    {
+      "name": "owner_id",
+      "type": "BIGINT",
+      "sample_digest": "00003469211d6dc6433d84f064b3cce9a6f07d491476de963cf231bede907555"
+    },
+    {
+      "name": "tag_name",
+      "type": "VARCHAR(128)",
+      "sample_digest": "0b3298ce311e567016833e2ea64067ac163d171bad5a3e69b4203a580cf19663"
+    },
+    {
+      "name": "note",
+      "type": "VARCHAR(128)",
+      "sample_digest": "96246ab0453fb18d6a5964f750a0ab21ed57cda56b681d06ec8dcccd19fdf2f0"
+    },
+    {
+      "name": "overseas_flag",
+      "type": "TINYINT",
+      "sample_digest": "053814160be17086032074ff116f8f9a4d8cdc1722adb9296c493ae6ad4300f5"
+    }
+  ],
+  "schema_digest": "f377444c27206365fe90f8483af840def660b397ecda148cb48da704a23bdbbe"
+}

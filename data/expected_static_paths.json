@@ -1,0 +1,159 @@
+{
+  "description": "static possible column-level dependencies (all paths, including ones behind un-executed branches)",
+  "outputs": {
+    "o_rel.uid_copy": [
+      [
+        "t1.uid",
+        "p_filt.uid",
+        "j_user.uid_copy",
+        "o_rel.uid_copy"
+      ]
+    ],
+    "o_rel.total_amt": [
+      [
+        "t1.amount",
+        "p_filt.amount",
+        "j_user.amount",
+        "a_sum.total_amt",
+        "p_agg.total_amt",
+        "o_rel.total_amt"
+      ]
+    ],
+    "o_rel.region": [
+      [
+        "t1.region",
+        "p_filt.region",
+        "j_user.region",
+        "a_sum.region",
+        "p_agg.region",
+        "o_rel.region"
+      ]
+    ],
+    "o_rel.country": [
+      [
+        "t2.country",
+        "j_user.country",
+        "a_sum.country",
+        "p_agg.country",
+        "o_rel.country"
+      ],
+      [
+        "t2.country_code",
+        "j_user.country",
+        "a_sum.country",
+        "p_agg.country",
+        "o_rel.country"
+      ]
+    ],
+    "o_rel.owner_id": [
+      [
+        "t2.owner_id",
+        "j_user.owner_id",
+        "o_rel.owner_id"
+      ],
+      [
+        "t1.uid",
+        "p_filt.uid",
+        "j_user.owner_id",
+        "o_rel.owner_id"
+      ]
+    ],
+    "o_rel.tag_name": [
+      [
+        "t3.tags",
+        "e_tags.tag_name",
+        "o_rel.tag_name"
+      ]
+    ],
+    "o_rel.note": [
+      [
+        "t2.country",
+        "j_user.country",
+        "p_note.note",
+        "o_rel.note"
+      ],
+      [
+        "t2.country_code",
+        "j_user.country",
+        "p_note.note",
+        "o_rel.note"
+      ]
+    ],
+    "o_rel.overseas_flag": [
+      [
+        "t1.overseas_flag",
+        "p_filt.overseas_flag",
+        "j_user.overseas_flag",
+        "p_over.overseas_flag",
+        "o_rel.overseas_flag"
+      ]
+    ]
+  },
+  "gates": {
+    "o_rel.uid_copy": [
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ],
+    "o_rel.total_amt": [
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ],
+    "o_rel.region": [
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ],
+    "o_rel.country": [
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ],
+    "o_rel.owner_id": [
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ],
+    "o_rel.tag_name": [
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ],
+    "o_rel.note": [
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ],
+    "o_rel.overseas_flag": [
+      [
+        "b_gate",
+        "b1"
+      ],
+      [
+        "b_route",
+        "take_exec"
+      ]
+    ]
+  },
+  "runtime_expected": {
+    "o_rel.uid_copy": "UNPROVABLE",
+    "o_rel.total_amt": "PROVEN",
+    "o_rel.region": "PROVEN",
+    "o_rel.country": "PARTIAL_PATH",
+    "o_rel.owner_id": "PARTIAL_PATH",
+    "o_rel.tag_name": "PROVEN",
+    "o_rel.note": "UNPROVABLE",
+    "o_rel.overseas_flag": "NOT_EXECUTED"
+  },
+  "no_contribution_reads": [
+    "p_dbg.dbg_audit"
+  ]
+}
